@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+# Prowler - the handy cloud security tool (copyright 2020) by Toni de la Fuente
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations under the License.
+
+CHECK_ID_extra781="7.81"
+CHECK_TITLE_extra781="[extra781] Find trust boundaries in VPC peerings (Not Scored) (Not part of CIS benchmark)"
+CHECK_SCORED_extra781="NOT_SCORED"
+CHECK_TYPE_extra781="EXTRA"
+CHECK_ALTERNATE_extra781="extra781"
+
+extra781(){
+    ACCOUNT_ID_WHITELIST_PATH="checks_config/check_${CHECK_ALTERNATE_extra781}_whitelist"
+    sed -i'' -e "s/__ACCOUNT_NUM__/${ACCOUNT_NUM}/" ${ACCOUNT_ID_WHITELIST_PATH}
+
+    containsElement () {
+        local element=$1
+        local string=$2
+        if [[ $string == *"${element}"* ]]; then
+            return 0 # match
+        else
+            return 1 # no-match
+        fi
+    }
+
+    for regx in ${REGIONS}; do    
+        ACCOUNT_ID_WHITELIST=$(cat ${ACCOUNT_ID_WHITELIST_PATH} | xargs)
+
+        VPC_PEERING_IDS=$(${AWSCLI} ec2 describe-vpc-peering-connections \
+                                ${PROFILE_OPT} \
+                                --query "VpcPeeringConnections[].VpcPeeringConnectionId" \
+                                --region ${regx} \
+                                --output text | xargs
+                                )
+
+        for VPC_PEERING_ID in $VPC_PEERING_IDS; do
+            OWNER_REQUESTER=$( aws ec2 describe-vpc-peering-connections \
+                                ${PROFILE_OPT} \
+                                --vpc-peering-connection-ids ${VPC_PEERING_ID} \
+                                --query "VpcPeeringConnections[].RequesterVpcInfo.OwnerId" \
+                                --output text | xargs
+                            )
+
+            OWNER_ACCEPTER=$( aws ec2 describe-vpc-peering-connections \
+                                ${PROFILE_OPT} \
+                                --vpc-peering-connection-ids ${VPC_PEERING_ID} \
+                                --query "VpcPeeringConnections[].AccepterVpcInfo.OwnerId" \
+                                --output text | xargs
+                            )
+
+            if [[ ${OWNER_REQUESTER} -eq ${OWNER_ACCEPTER} ]]; then
+                if [[ ${OWNER_REQUESTER} -eq ${ACCOUNT_NUM} ]]; then
+                    textInfo "${regx}: VPC peering between requester and accepter within this AWS account." "${regx}"
+                fi
+            else
+                OWNERS="${OWNER_REQUESTER} ${OWNER_ACCEPTER}"
+                SUSPECTED_OWNER=("${OWNERS[@]/$ACCOUNT_NUM}")
+
+                containsElement "${SUSPECTED_OWNER}" "${ACCOUNT_ID_WHITELIST}"
+                if [[ $? -eq 0 ]]; then
+                    textPass "${regx}: VPC peering between requester (${OWNER_ACCEPTER}) and accepter (${OWNER_ACCEPTER}) is on whitelist." "${regx}"
+                else
+                    textFail "${regx}: VPC peering with ${SUSPECTED_OWNER} is potentially untrusted and is not on whitelist." "${regx}"
+                fi
+            fi
+        done
+    done
+}
