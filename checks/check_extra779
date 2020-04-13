@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Prowler - the handy cloud security tool (copyright 2020) by Toni de la Fuente
+# Prowler - the handy cloud security tool (copyright 2019) by Toni de la Fuente
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy
@@ -10,66 +10,43 @@
 # under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
 # CONDITIONS OF ANY KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations under the License.
-
 CHECK_ID_extra779="7.79"
-CHECK_TITLE_extra779="[extra779] Find trust boundaries in VPC endpoint services connections (Not Scored) (Not part of CIS benchmark)"
+CHECK_TITLE_extra779="[extra779] Ensure no security groups allow ingress from 0.0.0.0/0 or ::/0 to Elasticsearch/Kibana ports"
 CHECK_SCORED_extra779="NOT_SCORED"
 CHECK_TYPE_extra779="EXTRA"
-CHECK_ALTERNATE_extra779="extra779"
+CHECK_ASFF_RESOURCE_TYPE_extra779="AwsEc2SecurityGroup"
+CHECK_ALTERNATE_check779="extra779"
 
 extra779(){
-    ACCOUNT_ID_WHITELIST_PATH="checks_config/check_${CHECK_ALTERNATE_extra779}_whitelist"
-    sed -i'' -e "s/__ACCOUNT_NUM__/${ACCOUNT_NUM}/" "${ACCOUNT_ID_WHITELIST_PATH}"
-
-    containsElement () {
-        element=$1
-        string=$2
-        if [[ $string == *"${element}"* ]]; then
-            return 0 # match
-        else
-            return 1 # no-match
+  ES_API_PORT="9200"
+  ES_DATA_PORT="9300"
+  ES_KIBANA_PORT="5601"
+  # Test connectivity and authentication is performed by check extra787
+  for regx in $REGIONS; do
+    # crate a list of SG open to the world with port $ES_API_PORT or $ES_DATA_PORT or $ES_KIBANA_PORT
+    SG_LIST=$($AWSCLI ec2 describe-security-groups $PROFILE_OPT --region $regx --output text \
+      --query "SecurityGroups[?length(IpPermissions[?((FromPort==null && ToPort==null) || (FromPort<=\`$ES_API_PORT\` && ToPort>=\`$ES_API_PORT\`) || (FromPort<=\`$ES_DATA_PORT\` && ToPort>=\`$ES_DATA_PORT\`) || (FromPort<=\`$ES_KIBANA_PORT\` && ToPort>=\`$ES_KIBANA_PORT\`)) && (contains(IpRanges[].CidrIp, \`0.0.0.0/0\`) || contains(Ipv6Ranges[].CidrIpv6, \`::/0\`))]) > \`0\`].{GroupId:GroupId}")
+    # in case of open security groups goes through each one
+    if [[ $SG_LIST ]];then
+      for sg in $SG_LIST;do
+        # temp file store the list of instances IDs and public IP address if found
+        TEMP_EXTRA779_FILE=$(mktemp -t prowler-${ACCOUNT_NUM}-es-domain.EXTRA779.XXXXXXXXXX)
+        # finds instances with that open security group attached and get its public ip address (if it has one)
+        $AWSCLI $PROFILE_OPT --region $regx ec2 describe-instances --filters Name=instance.group-id,Values=$sg --query 'Reservations[*].Instances[*].[InstanceId,PublicIpAddress]' --output text > $TEMP_EXTRA779_FILE
+        # in case of exposed instances it does access checks
+        if [[ -s "$TEMP_EXTRA779_FILE" ]];then
+          while read instance eip ; do
+            if [[ "$eip" == "None" ]];then
+              textInfo "$regx: Found instance $instance with private IP on Security Group: $sg" "$regx"
+            else
+              textFail "$regx: Found instance $instance with public IP $eip on Security Group: $sg open to 0.0.0.0/0 on for Elasticsearch/Kibana ports - use extra787 to test AUTH" "$regx"
+            fi
+          done < <(cat $TEMP_EXTRA779_FILE)
         fi
-    }
-
-    dropElement () {
-        local element=$1
-        ENDPOINT_CONNECTION_LIST=("${ENDPOINT_CONNECTION_LIST[@]/$element}")
-        return 0 
-    }
-
-    for regx in ${REGIONS}; do
-        ACCOUNT_ID_WHITELIST=$(cat ${ACCOUNT_ID_WHITELIST_PATH} | xargs)
-        
-        ENDPOINT_SERVICES_IDS=$(${AWSCLI} ec2 describe-vpc-endpoint-services \
-                                ${PROFILE_OPT} \
-                                --query "ServiceDetails[?Owner=='${ACCOUNT_NUM}'].ServiceId" \
-                                --region ${regx} \
-                                --output text | xargs
-                                )
-
-        for ENDPOINT_SERVICE_ID in ${ENDPOINT_SERVICES_IDS}; do
-    
-            ENDPOINT_CONNECTION_LIST=$(${AWSCLI} ec2 describe-vpc-endpoint-connections \
-                                        ${PROFILE_OPT} \
-                                        --query "VpcEndpointConnections[?VpcEndpointState=='available'].VpcEndpointOwner" \
-                                        --region ${regx} \
-                                        --output text | xargs
-                                        )
-            
-            for ENDPOINT_CONNECTION in ${ENDPOINT_CONNECTION_LIST}; do
-                for ACCOUNT_ID in ${ACCOUNT_ID_WHITELIST}; do
-                    containsElement "${ACCOUNT_ID}" "${ENDPOINT_CONNECTION}"
-                    if [[ $? -eq 0 ]]; then
-                        textInfo "${regx}: Found trusted account in VPC endpoint service connection ${ENDPOINT_CONNECTION}" "${regx}"
-                        ENDPOINT_CONNECTION_LIST=("${ENDPOINT_CONNECTION_LIST[@]/$ENDPOINT_CONNECTION}") # remove hit from whitelist
-                        break
-                    fi
-                done
-            done
-
-            for UNTRUSTED_CONNECTION in ${ENDPOINT_CONNECTION_LIST}; do
-                textFail "${regx}: Found untrusted account in VPC endpoint service connection ${UNTRUSTED_CONNECTION}" "${regx}"
-            done
-        done  
-    done
+        rm -rf $TEMP_EXTRA779_FILE
+      done
+    else
+      textPass "$regx: No Security Groups found open to 0.0.0.0/0 for Elasticsearch/Kibana ports" "$regx"
+    fi
+  done
 }
